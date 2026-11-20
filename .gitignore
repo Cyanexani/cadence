@@ -1,0 +1,13 @@
+.venv/
+data/
+oauth-client.json
+__pycache__/
+*.pyc
+node_modules/
+.vercel/
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/gen/android/app/src/main/jniLibs/
+dist/
+screenshots/
+.impeccable/

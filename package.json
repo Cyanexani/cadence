@@ -1,0 +1,12 @@
+{
+  "name": "cadence",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Cadence music player: web (Vercel) and Android (Tauri) shells around one UI",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.6"
+  }
+}

@@ -1,0 +1,45 @@
+[package]
+name = "cadence"
+version = "0.0.1"
+description = "Cadence: a YouTube Music player with a frosted-glass UI"
+authors = ["Cadence"]
+license = "GPL-3.0-or-later"
+edition = "2024"
+rust-version = "1.90"
+
+[lib]
+name = "cadence_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.7", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+tauri-plugin-log = "2"
+# rustls keeps the Android build free of OpenSSL.
+rustypipe = { version = "0.11.4", default-features = false, features = ["rustls-tls-webpki-roots", "userdata"] }
+sha1 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+tokio = { version = "1", features = ["sync", "time"] }
+futures = "0.3"
+sha2 = "0.10"
+rand = "0.8"
+regex = "1"
+url = "2"
+
+[patch.crates-io]
+# Adds the Android bindings the crates.io release lacks; see vendor/rquickjs-sys/CADENCE-PATCH.md.
+rquickjs-sys = { path = "vendor/rquickjs-sys" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
