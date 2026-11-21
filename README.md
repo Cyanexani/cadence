@@ -51,7 +51,7 @@ Or run the web version yourself (below).
 | Where | How the music API runs | Start it |
 |---|---|---|
 | Your computer | Python (`server.py` + `core.py`, ytmusicapi) | `.venv\Scripts\python server.py --open` |
-| Vercel | Python serverless function (`api/index.py` + `core.py`) | `vercel deploy` |
+| Vercel | the same Python app (`server.py`'s WSGI `app` + `core.py`) | `vercel deploy` |
 | Android | Rust inside a Tauri 2 app (`src-tauri/`, rustypipe) | install the APK |
 | Windows | the same Rust core and Tauri app | run the installer |
 
@@ -117,8 +117,7 @@ It serves `public/` and the API on http://127.0.0.1:5288.
 
 ## Deploy to Vercel
 
-`vercel.json` serves `public/` as static files and rewrites every `/api/*` call to the Python
-function in `api/index.py`. Answers that are the same for everyone (search, albums, lyrics…) are
+Vercel serves `public/` as static files and runs the WSGI `app` in `server.py` for every `/api/*` call. Answers that are the same for everyone (search, albums, lyrics…) are
 edge-cached for 10 minutes.
 
 ```powershell
@@ -184,8 +183,7 @@ helpers with `cargo test --lib`.
 ```
 public/          the UI shared by every version (index.html, app.css, store.js, app.js, features.js)
 core.py          stateless music API (YouTube Music, LRCLIB, SponsorBlock, Google device sign-in)
-server.py        local server: public/ + core.py
-api/index.py     Vercel function: core.py
+server.py        local server, plus the WSGI app Vercel runs: public/ + core.py
 src-tauri/       Android and Windows app; src/music.rs and src/extras.rs are the Rust port of core.py
 src-tauri/gen/android/app/src/main/java/app/cadence/player/   in-app Google sign-in (Kotlin)
 src-tauri/vendor/rquickjs-sys   patched dependency that adds Android bindings (see its CADENCE-PATCH.md)

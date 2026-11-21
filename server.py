@@ -10,7 +10,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from core import dispatch, read_secrets
+from core import CACHEABLE, SECRET_HEADERS, dispatch, is_personal, read_secrets
 
 ROOT = Path(__file__).resolve().parent
 PUBLIC_DIR = ROOT / "public"
@@ -60,6 +60,36 @@ class Handler(SimpleHTTPRequestHandler):
         except json.JSONDecodeError:
             return self.answer(HTTPStatus.BAD_REQUEST, {"error": "The request body must be JSON."})
         self.api(body if isinstance(body, dict) else {})
+
+
+EDGE_CACHE = "public, s-maxage=600, stale-while-revalidate=3600"
+
+
+def app(environ, start_response):
+    """WSGI entry point. Vercel runs this for /api/*; it serves public/ itself."""
+    path = environ.get("PATH_INFO", "")
+    params = {k: v[0] for k, v in parse_qs(environ.get("QUERY_STRING", "")).items()}
+    headers = {name: environ.get("HTTP_" + name.upper().replace("-", "_"), "") for name in SECRET_HEADERS.values()}
+    secrets = read_secrets(headers)
+    body = None
+    if environ.get("REQUEST_METHOD") == "POST":
+        length = min(int(environ.get("CONTENT_LENGTH") or 0), MAX_BODY_BYTES)
+        try:
+            body = json.loads(environ["wsgi.input"].read(length) or b"{}")
+        except json.JSONDecodeError:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+    status, payload = dispatch(path, params, secrets, body)
+    shareable = status == 200 and body is None and path in CACHEABLE and not is_personal(path, secrets)
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    start_response(f"{status} {HTTPStatus(status).phrase}", [
+        ("Content-Type", "application/json; charset=utf-8"),
+        ("Content-Length", str(len(data))),
+        # Anything answered for a signed-in listener is theirs alone: never let the edge keep it.
+        ("Cache-Control", EDGE_CACHE if shareable else "private, no-store"),
+        ("Vary", "X-Cadence-Token"),
+    ])
+    return [data]
 
 
 def main():

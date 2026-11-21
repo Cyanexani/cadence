@@ -11,3 +11,5 @@ src-tauri/gen/android/app/src/main/jniLibs/
 dist/
 screenshots/
 .impeccable/
+.vercel
+.env*
