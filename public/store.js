@@ -22,7 +22,7 @@ const TOP_ARTISTS = 10;
 const TOP_ALBUMS = 6;
 const NAME_LIMIT = 120;
 const TRACK_KEYS = ["id", "title", "artist", "artistId", "album", "albumId", "duration", "art", "video", "explicit"];
-const SETTING_KEYS = new Set(["language", "region", "crossfade", "sponsorblock", "shortcuts", "syncHistory"]);
+const SETTING_KEYS = new Set(["language", "region", "crossfade", "sponsorblock", "shortcuts", "syncHistory", "nativeAudio"]);
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 const SHORT_CODE = /^[A-Za-z_-]{0,8}$/;
 

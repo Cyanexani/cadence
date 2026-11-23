@@ -13,6 +13,10 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // NewPipe Extractor is published here.
+        maven("https://jitpack.io") {
+            content { includeGroupByRegex("com\\.github\\.TeamNewPipe.*") }
+        }
     }
 }
 

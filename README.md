@@ -12,7 +12,8 @@ playing. It runs as a web app, on Vercel, on Android and on Windows, all from on
 |---|---|
 | ![An album page with the artwork-tinted glass](docs/album.jpg) | ![Phone layout with a song's menu](docs/phone-menu.jpg) |
 
-Every song plays through YouTube's own embedded player, so nothing is downloaded or ripped. Your
+On the web and Windows, every song plays through YouTube's own embedded player. The Android app
+streams each song's best audio directly instead (see below). Nothing is downloaded or saved. Your
 library (likes, history, playlists, settings) is stored on your device, never on a server. Use
 **Settings › Save a backup** to keep a copy.
 
@@ -54,6 +55,25 @@ Or run the web version yourself (below).
 | Vercel | the same Python app (`server.py`'s WSGI `app` + `core.py`) | `vercel deploy` |
 | Android | Rust inside a Tauri 2 app (`src-tauri/`, rustypipe) | install the APK |
 | Windows | the same Rust core and Tauri app | run the installer |
+
+## High-quality audio on Android
+
+The Android app plays each song's best audio stream itself, usually Opus at about 140–160 kbps
+(YouTube Music's top free quality), instead of going through YouTube's web player:
+
+- **Background playback:** music keeps playing with the screen off or another app open, with a
+  media notification and lock-screen, headset, Bluetooth and car controls.
+- **Gapless:** the next five songs are queued in the player, so songs follow on without a gap and
+  keep coming even if the app is swiped away.
+- **Fallback:** a song that won't play this way switches to YouTube's embedded player by itself.
+  After three failures in a row the app sticks with YouTube's player until it's restarted.
+- The now-playing panel shows the stream's codec and bitrate. Turn it off in
+  **Settings › Playback › High-quality audio**.
+
+How it works: `PlaybackService.kt` runs ExoPlayer (Media3) as a foreground media service;
+`YouTubeAudio.kt` asks [NewPipe Extractor](https://github.com/TeamNewPipe/NewPipeExtractor) for
+the song's audio streams and picks the highest bitrate (Opus wins a tie); `NativePlayerPlugin.kt`
+connects it to the UI, where `app.js` drives it through the same calls as YouTube's player.
 
 ## Google sign-in
 
@@ -169,12 +189,15 @@ helpers with `cargo test --lib`.
 
 ## Known limits
 
-- **Background playback:** the YouTube player pauses when the Android app goes to the background
-  or the screen turns off. YouTube only allows that with YouTube Premium in its own apps.
+- **Background playback** needs the Android app's high-quality audio (on by default). On the web
+  and Windows, and for songs that fall back to YouTube's player, music pauses when the app goes to
+  the background, as YouTube only allows that with YouTube Premium in its own apps.
+- **Premium-only quality** (256 kbps) isn't used: it needs YouTube's web client with a Premium
+  account, which the native player doesn't sign in to.
 - **The apps have no podcasts**, and build Home from charts and new releases (even when signed in),
   because rustypipe has no podcast or personalised home endpoints.
-- **Not available**, because they need the raw audio stream: equalizer, loudness normalisation,
-  skip-silence, offline downloads.
+- **Not available yet:** equalizer, loudness normalisation, skip-silence and offline downloads.
+  The Android app's native player now has the raw stream these need, so they're possible there.
 - **Backups on Android:** *Save a backup* uses a browser download, which the Android webview may
   ignore. Restore works.
 
@@ -185,14 +208,18 @@ public/          the UI shared by every version (index.html, app.css, store.js, 
 core.py          stateless music API (YouTube Music, LRCLIB, SponsorBlock, Google device sign-in)
 server.py        local server, plus the WSGI app Vercel runs: public/ + core.py
 src-tauri/       Android and Windows app; src/music.rs and src/extras.rs are the Rust port of core.py
-src-tauri/gen/android/app/src/main/java/app/cadence/player/   in-app Google sign-in (Kotlin)
+src-tauri/gen/android/app/src/main/java/app/cadence/player/   Kotlin: in-app Google sign-in,
+                 native playback (PlaybackService, NativePlayerPlugin, YouTubeAudio), and
+                 recovery when Android kills the web view's renderer (RendererGuardClient)
 src-tauri/vendor/rquickjs-sys   patched dependency that adds Android bindings (see its CADENCE-PATCH.md)
 ```
 
 ## Licence
 
-GPL-3.0-or-later (see `LICENSE`): the apps link rustypipe, which is GPL-3.0. The vendored
+GPL-3.0-or-later (see `LICENSE`): the apps link rustypipe, which is GPL-3.0, and the Android app
+also includes NewPipe Extractor (GPL-3.0-or-later). The vendored
 `rquickjs-sys` keeps its own MIT licence.
 
 Cadence isn't affiliated with YouTube or Google. Songs play through YouTube's official embedded
-player, and lyrics come from LRCLIB.
+player (on Android, from YouTube's audio streams via NewPipe Extractor), and lyrics come from
+LRCLIB.

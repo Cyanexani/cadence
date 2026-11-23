@@ -22,6 +22,17 @@ const LISTEN_AGAIN_COUNT = 12;
 const HOME_CHIP_COUNT = 14;
 const BLOCKED_EMBED_CODES = [101, 150, 152];
 const IN_APP = Boolean(window.__TAURI__);
+// The Android app plays YouTube's best audio stream itself (PlaybackService.kt), so music keeps
+// going with the screen off or another app open. A song it can't play goes to YouTube's player.
+const NATIVE_AUDIO = IN_APP && /Android/i.test(navigator.userAgent);
+const NATIVE_FAILS_BEFORE_GIVING_UP = 3;
+// Songs handed to the native player ahead of time: they play on even if the app is swiped away.
+const NATIVE_QUEUE_AHEAD = 5;
+// In the background the page's timers slow to a crawl; the native player's playing state is
+// reliable, so listening time may be counted over longer gaps there.
+const NATIVE_MAX_TICK_GAP_MS = 120000;
+// YT.PlayerState's values, which the native player reports too.
+const PS = Object.freeze({ UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 });
 const SEARCH_KINDS = [
   ["songs", "Songs"], ["videos", "Videos"], ["albums", "Albums"],
   ["artists", "Artists"], ["playlists", "Playlists"], ["podcasts", "Podcasts"],
@@ -268,7 +279,7 @@ const els = Object.fromEntries([
   "autoplay", "scrim", "bar-art", "bar-title", "bar-artist", "bar-like", "shuffle", "prev", "play", "next",
   "repeat", "t-cur", "seek", "t-dur", "lyrics-btn", "sleep-btn", "sleep-left", "sleep-pop", "np-toggle",
   "mute", "vol", "lyrics-full", "lf-art", "lf-title", "lf-artist", "lf-close", "lyrics-full-body", "toast",
-  "liked-count", "bd-a", "bd-b",
+  "liked-count", "bd-a", "bd-b", "np-art", "np-quality",
 ].map((id) => [id.replace(/-(\w)/g, (_, c) => c.toUpperCase()), document.getElementById(id)]));
 
 const state = {
@@ -336,8 +347,9 @@ function restore() {
 // ---------------------------------------------------------------- YouTube player
 
 let players = [];
-let player = null;
+let player = null; // YouTube's player, or nativePlayer while that one is in charge
 let playerReady = false;
+let ytReady = false;
 let pendingLoad = null;
 let tickTimer = null;
 let seeking = false;
@@ -354,7 +366,7 @@ function loadYouTube() {
       playerVars: { controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, playsinline: 1, rel: 0, origin: location.origin },
       events: { onReady: onPlayerReady, onStateChange: onPlayerState, onError: onPlayerError },
     }));
-    player = players[0];
+    if (!player) player = players[0];
   };
   const script = document.createElement("script");
   script.src = "https://www.youtube.com/iframe_api";
@@ -370,6 +382,8 @@ function onPlayerReady(event) {
   event.target.setVolume(state.volume);
   if (state.muted) event.target.mute();
   if (event.target !== players[0]) return;
+  ytReady = true;
+  if (player === nativePlayer) return; // standing by in case a song won't play natively
   playerReady = true;
   frontPlayer(player);
   if (pendingLoad) {
@@ -382,6 +396,7 @@ function onPlayerReady(event) {
 }
 
 function load(track, { autoplay = true, start = 0 } = {}) {
+  choosePlayer();
   const run = () => (autoplay
     ? player.loadVideoById({ videoId: track.id, startSeconds: start })
     : player.cueVideoById({ videoId: track.id, startSeconds: start }));
@@ -396,7 +411,7 @@ function duration() {
 
 function onPlayerState(event) {
   if (event.target !== player) return;
-  const S = YT.PlayerState;
+  const S = PS;
   if (event.data === S.PLAYING) {
     state.playing = true;
     state.skipsInARow = 0;
@@ -447,6 +462,250 @@ async function onPlayerError(event) {
   next(true);
 }
 
+// ---------------------------------------------------------------- native player (Android app)
+
+let nativePlayer = null;
+let nativeGaveUp = false;
+let nativeQueued; // ids of the songs the native player has queued after this one, comma-joined
+
+const nativeCall = (action, args = null) => window.__TAURI__.core.invoke("native_player", { action, args });
+
+function nativeWanted() {
+  return Boolean(nativePlayer) && !nativeGaveUp && state.settings.nativeAudio !== false;
+}
+
+function nativeTrack(track) {
+  return track && { id: track.id, title: track.title || "", artist: track.artist || "", album: track.album || "", art: track.art || "" };
+}
+
+// Native for every song unless it's turned off or keeps failing; YouTube's player otherwise.
+function choosePlayer() {
+  if (nativeWanted()) {
+    if (player === nativePlayer) return;
+    if (fade) endFade();
+    if (isUsable(player)) player.stopVideo();
+    player = nativePlayer;
+    playerReady = true;
+    pendingLoad = null;
+  } else if (player === nativePlayer) {
+    nativePlayer.stopVideo();
+    player = players[0] || null;
+    playerReady = ytReady && Boolean(player);
+  } else {
+    return;
+  }
+  frontPlayer(player);
+  renderNativeMode();
+}
+
+// A stand-in for YT.Player, with the calls this file makes, that drives PlaybackService.
+function createNativePlayer() {
+  const np = {
+    id: null,
+    status: PS.UNSTARTED,
+    position: 0, // seconds, as last reported...
+    at: 0, // ...at this performance.now()
+    duration: 0,
+    playing: false,
+    quality: null,
+    fails: 0,
+    volume: state.volume,
+    muted: state.muted,
+    loadVideoById({ videoId, startSeconds = 0 }) { np.start(videoId, startSeconds, true); },
+    cueVideoById({ videoId, startSeconds = 0 }) { np.start(videoId, startSeconds, false); },
+    start(id, start, autoplay) {
+      const track = state.queue.find((t) => t.id === id) || current();
+      Object.assign(np, { id, position: start, at: performance.now(), duration: track?.duration || 0, playing: false, quality: null });
+      const upcoming = nativeUpcoming();
+      nativeQueued = upcoming.map((t) => t.id).join(",");
+      np.pushVolume();
+      nativeCall("playTrack", { ...nativeTrack(track), start, autoplay, upcoming })
+        .catch((err) => onNativeError({ id, code: "bridge", message: String(err?.message || err) }));
+      np.setStatus(autoplay ? PS.BUFFERING : PS.CUED);
+      renderQuality();
+    },
+    playVideo() { nativeCall("play").catch((err) => onNativeError({ id: np.id, code: "bridge", message: String(err) })); },
+    pauseVideo() { nativeCall("pause").catch(() => { /* reported by the next state event */ }); },
+    stopVideo() {
+      if (!np.id) return;
+      Object.assign(np, { id: null, playing: false, status: PS.UNSTARTED, quality: null });
+      nativeCall("stop").catch(() => { /* already stopped */ });
+    },
+    seekTo(seconds) {
+      np.position = seconds;
+      np.at = performance.now();
+      nativeCall("seek", { seconds }).catch(() => { /* the next state event has the real position */ });
+    },
+    getCurrentTime() {
+      const t = np.playing ? np.position + (performance.now() - np.at) / 1000 : np.position;
+      return np.duration ? Math.min(t, np.duration) : t;
+    },
+    getDuration() { return np.duration; },
+    getPlayerState() { return np.status; },
+    getIframe() { return null; },
+    setVolume(volume) { np.volume = volume; np.pushVolume(); },
+    mute() { np.muted = true; np.pushVolume(); },
+    unMute() { np.muted = false; np.pushVolume(); },
+    pushVolume() { nativeCall("setVolume", { volume: np.volume, muted: np.muted }).catch(() => { /* cosmetic */ }); },
+    setStatus(status) {
+      if (status === np.status) return;
+      np.status = status;
+      onPlayerState({ target: np, data: status });
+    },
+    onState(s) {
+      if (!s.id || s.id !== np.id) return; // about a song this player has already left
+      np.position = s.position || 0;
+      np.at = performance.now();
+      if (s.duration) np.duration = s.duration;
+      np.playing = Boolean(s.playing);
+      if (s.codec) np.quality = `${s.codec} · ${Math.round((s.bitrate || 0) / 1000)} kbps`;
+      renderQuality();
+      let status;
+      if (s.state === "ended") status = PS.ENDED;
+      else if (s.playing) status = PS.PLAYING;
+      else if (s.state === "buffering" && s.playWhenReady) status = PS.BUFFERING;
+      else if (s.state === "idle") status = np.status;
+      else status = PS.PAUSED;
+      if (status === PS.PLAYING) np.fails = 0;
+      np.setStatus(status);
+    },
+  };
+  return np;
+}
+
+function onNativeEvent(event, data) {
+  if (!nativePlayer) return;
+  if (event === "state") nativePlayer.onState(data || {});
+  else if (event === "transition") onNativeTransition(data?.id);
+  else if (event === "error") onNativeError(data || {});
+  else if (event === "remote") {
+    // Notification, lock screen, headset or car buttons.
+    if (data?.action === "next") next();
+    else if (data?.action === "previous") prev();
+  }
+}
+
+// The native player went on to the song it had queued, without waiting for this page.
+function onNativeTransition(id) {
+  if (player !== nativePlayer || !id) return;
+  const expected = upcomingIndex();
+  const i = state.queue[expected]?.id === id ? expected : state.queue.findIndex((t, k) => k > state.index && t.id === id);
+  accrueListen(); // the stretch since the page's last tick, which may be long in the background
+  flushListen();
+  Object.assign(nativePlayer, { id, position: 0, at: performance.now(), duration: state.queue[i]?.duration || 0, quality: null });
+  nativeQueued = undefined;
+  if (i < 0) {
+    next(true); // the queue changed meanwhile: go by the queue
+    return;
+  }
+  state.index = i;
+  state.position = 0;
+  onTrackChange();
+}
+
+function onNativeError({ id, code, message }) {
+  if (player !== nativePlayer || !id || id !== nativePlayer.id) return;
+  console.warn(`Native playback failed (${code}): ${message}`);
+  nativePlayer.fails += 1;
+  if (nativePlayer.fails >= NATIVE_FAILS_BEFORE_GIVING_UP && !nativeGaveUp) {
+    nativeGaveUp = true;
+    toast("High-quality audio isn't working right now, so Cadence switched to YouTube's player.");
+  }
+  // This song goes to YouTube's player; the next one tries native again (unless given up).
+  const track = current();
+  if (!track || track.id !== id) return;
+  const start = nativePlayer.getCurrentTime() || 0;
+  nativePlayer.stopVideo();
+  player = players[0] || null;
+  playerReady = ytReady && Boolean(player);
+  frontPlayer(player);
+  renderNativeMode();
+  const run = () => player.loadVideoById({ videoId: track.id, startSeconds: start });
+  if (playerReady) run();
+  else pendingLoad = run;
+}
+
+// The songs that follow this one, the way next() would go through them.
+function nativeUpcoming() {
+  if (state.sleep?.endOfSong || state.repeat === "one") return []; // stop after, or repeat, this one
+  const n = state.queue.length;
+  const out = [];
+  for (let k = state.index + 1; out.length < NATIVE_QUEUE_AHEAD; k += 1) {
+    if (k >= n && (state.repeat !== "all" || n < 2)) break;
+    const i = k % n;
+    if (i === state.index) break;
+    out.push(nativeTrack(state.queue[i]));
+  }
+  return out;
+}
+
+// Keep the native player's queued songs in step with the queue, repeat mode and sleep timer.
+function syncNativeNext() {
+  if (!nativePlayer || player !== nativePlayer || !nativePlayer.id) return;
+  const upcoming = nativeUpcoming();
+  const ids = upcoming.map((t) => t.id).join(",");
+  if (ids === nativeQueued) return;
+  nativeQueued = ids;
+  nativeCall("setUpcoming", { upcoming }).catch(() => { nativeQueued = undefined; });
+}
+
+// After the app was closed or its page rebuilt, the music may still be playing: pick it up.
+async function adoptNativePlayback() {
+  let s;
+  try {
+    s = await nativeCall("status");
+  } catch {
+    return false;
+  }
+  if (!s?.id || s.state === "idle" || nativePlayer.id) return false;
+  let i = state.queue.findIndex((t, k) => k >= state.index && t.id === s.id);
+  if (i < 0) i = state.queue.findIndex((t) => t.id === s.id);
+  if (i < 0) return false;
+  if (i !== state.index) {
+    state.index = i;
+    onTrackChange();
+  }
+  nativePlayer.id = s.id;
+  nativePlayer.duration = current()?.duration || 0;
+  nativePlayer.onState(s);
+  if (nativePlayer.status === PS.UNSTARTED) nativePlayer.setStatus(PS.PAUSED);
+  nativeQueued = undefined;
+  syncNativeNext();
+  return true;
+}
+
+async function startNativePlayer() {
+  if (!nativeWanted()) {
+    choosePlayer();
+    if (playerReady && current()) player.cueVideoById({ videoId: current().id, startSeconds: state.position || 0 });
+    return;
+  }
+  if (await adoptNativePlayback()) return;
+  if (current() && player === nativePlayer && !nativePlayer.id) {
+    player.cueVideoById({ videoId: current().id, startSeconds: state.position || 0 });
+  }
+}
+
+// Settings → High-quality audio was switched: move the current song over, where it was.
+function onNativeSettingChanged() {
+  nativeGaveUp = false;
+  const track = current();
+  if (!track || nativeWanted() === (player === nativePlayer)) return;
+  const start = playerReady && player ? player.getCurrentTime() || state.position : state.position;
+  load(track, { autoplay: state.playing, start });
+}
+
+function renderNativeMode() {
+  els.app.classList.toggle("native-audio", Boolean(nativePlayer) && player === nativePlayer);
+  renderQuality();
+}
+
+function renderQuality() {
+  const quality = player === nativePlayer ? nativePlayer?.quality : null;
+  els.npQuality.hidden = !quality;
+  els.npQuality.textContent = quality || "";
+}
+
 function startTick() {
   stopTick();
   tickTimer = setInterval(tick, TICK_MS);
@@ -458,13 +717,19 @@ function stopTick() {
   tickTimer = null;
 }
 
-function tick() {
-  if (!playerReady) return;
+function accrueListen() {
   const now = performance.now();
   if (state.playing && state.listen.track) {
-    state.listen.seconds += Math.min(now - state.listen.last, MAX_TICK_GAP_MS) / 1000;
+    const cap = player && player === nativePlayer ? NATIVE_MAX_TICK_GAP_MS : MAX_TICK_GAP_MS;
+    state.listen.seconds += Math.min(now - state.listen.last, cap) / 1000;
   }
   state.listen.last = now;
+}
+
+function tick() {
+  if (!playerReady) return;
+  accrueListen();
+  const now = performance.now();
   const t = player.getCurrentTime() || 0;
   const d = duration();
   state.position = t;
@@ -562,7 +827,7 @@ function togglePlay() {
   }
   if (!playerReady) return;
   if (fade) endFade();
-  const S = YT.PlayerState;
+  const S = PS;
   const st = player.getPlayerState();
   if (st === S.PLAYING || st === S.BUFFERING) player.pauseVideo();
   else if (st === S.PAUSED || st === S.CUED || st === S.ENDED) player.playVideo();
@@ -635,7 +900,7 @@ function cycleRepeat() {
 }
 
 function applyVolume() {
-  for (const p of players.filter(isUsable)) {
+  for (const p of [...players, nativePlayer].filter(isUsable)) {
     if (state.muted) p.mute();
     else p.unMute();
     if (!fade) p.setVolume(state.volume);
@@ -672,6 +937,7 @@ function upcomingIndex() {
 }
 
 function maybeCrossfade(t, d) {
+  if (player === nativePlayer) return; // songs follow on gaplessly there instead
   const seconds = Number(state.settings.crossfade) || 0;
   if (!seconds || fade || !state.playing || !d || d < seconds * MIN_FADE_TRACK_RATIO) return;
   if (d - t > seconds || state.sleep?.endOfSong) return;
@@ -915,6 +1181,7 @@ function sleepTick() {
 }
 
 function renderSleep() {
+  syncNativeNext();
   let label = "";
   if (state.sleep?.endOfSong) label = "End";
   else if (state.sleep?.until) label = fmt((state.sleep.until - Date.now()) / 1000);
@@ -981,6 +1248,7 @@ function artistLink(track) {
 function renderNowPlaying() {
   const track = current();
   els.app.classList.toggle("has-track", !!track);
+  els.npArt.innerHTML = track?.art ? artImg(track.art, "", { lazy: false }) : "";
   els.npTitle.textContent = track?.title || "Nothing playing";
   els.npArtist.innerHTML = track
     ? artistLink(track) + (track.album && track.albumId
@@ -1002,6 +1270,7 @@ function renderNowPlaying() {
 }
 
 function renderQueue() {
+  syncNativeNext();
   const upcoming = state.queue.slice(state.index + 1);
   els.qCount.textContent = upcoming.length ? String(upcoming.length) : "";
   if (!upcoming.length) {
@@ -1034,6 +1303,7 @@ function renderPlayState() {
 }
 
 function renderControls() {
+  syncNativeNext();
   els.shuffle.classList.toggle("on", state.shuffle);
   els.shuffle.setAttribute("aria-pressed", String(state.shuffle));
   els.repeat.innerHTML = state.repeat === "one" ? I.repeatOne : I.repeat;
@@ -1732,6 +2002,13 @@ async function init() {
     loadLyrics(current());
     resetListen(current());
   }
+  if (NATIVE_AUDIO) {
+    nativePlayer = createNativePlayer();
+    window.__cadenceNative = onNativeEvent;
+    player = nativePlayer;
+    playerReady = true;
+    renderNativeMode();
+  }
   bindEvents();
   loadYouTube();
   try {
@@ -1739,6 +2016,7 @@ async function init() {
   } catch (err) {
     toast(`Couldn't load your library: ${err.message}`);
   }
+  if (nativePlayer) startNativePlayer(); // needs the settings, just loaded
   renderLikes();
   renderAccountChip();
   renderRoute(true);

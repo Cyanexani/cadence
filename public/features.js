@@ -518,7 +518,9 @@ function renderSettings() {
   setView(`<h1 class="page-title">Settings</h1>
     <section class="settings glass-inset"><h2>Google account</h2><div id="account-section"></div></section>
     <section class="settings glass-inset"><h2>Playback</h2>
-      ${settingRow("Crossfade", "Fade the next song in while this one fades out. Uses a second YouTube player.",
+      ${NATIVE_AUDIO ? settingRow("High-quality audio", "Play YouTube's best audio stream (usually Opus, around 140–160 kbps) right in the app, so music keeps going with the screen off or another app open, and songs follow on without a gap. Turn off to use YouTube's embedded player.",
+        `<input type="checkbox" class="switch" role="switch" id="set-native-audio"${s.nativeAudio !== false ? " checked" : ""}>`, "set-native-audio") : ""}
+      ${settingRow("Crossfade", `Fade the next song in while this one fades out. Uses a second YouTube player${NATIVE_AUDIO ? ", so it's off while high-quality audio is on" : ""}.`,
         `<input type="range" id="set-crossfade" min="0" max="${CROSSFADE_MAX_SECONDS}" step="1" value="${crossfade}"><output id="set-crossfade-out">${crossfade ? `${crossfade} s` : "Off"}</output>`, "set-crossfade")}
       ${settingRow("Keep playing similar songs", "When the queue runs out, start a radio from the last song.",
         `<input type="checkbox" class="switch" role="switch" id="set-autoplay"${state.autoplay ? " checked" : ""}>`, "set-autoplay")}
@@ -539,7 +541,9 @@ function renderSettings() {
       <div class="hero-actions"><button class="btn" type="button" data-export>Save a backup</button><button class="btn" type="button" data-import>Restore a backup</button><button class="btn" type="button" data-clear-searches>Clear search history</button></div>
     </section>
     <section class="settings glass-inset"><h2>How Cadence plays music</h2>
-      <p class="set-help">Search and browsing come from YouTube Music, and every song plays through YouTube's own embedded player, so nothing is downloaded. Lyrics come from LRCLIB and skip segments from SponsorBlock. Songs whose owners block playback outside YouTube are swapped for another upload or skipped.</p>
+      <p class="set-help">Search and browsing come from YouTube Music${NATIVE_AUDIO
+        ? ". With high-quality audio on, the app streams each song's best audio directly from YouTube (using NewPipe Extractor), and falls back to YouTube's embedded player for any song that won't play that way"
+        : ", and every song plays through YouTube's own embedded player"}, so nothing is downloaded. Lyrics come from LRCLIB and skip segments from SponsorBlock. Songs whose owners block playback outside YouTube are swapped for another upload or skipped.</p>
     </section>`);
   setFill(document.getElementById("set-crossfade"));
   renderAccountSection();
@@ -790,6 +794,9 @@ function bindFeatureEvents() {
       await saveSettings({ syncHistory: e.target.checked }, e.target.checked
         ? "Plays will be added to your YouTube Music history"
         : "Plays stay on this device only");
+    } else if (id === "set-native-audio") {
+      await saveSettings({ nativeAudio: e.target.checked }, e.target.checked ? "High-quality audio on" : "Using YouTube's embedded player");
+      onNativeSettingChanged();
     } else if (id === "set-sponsorblock") {
       await saveSettings({ sponsorblock: e.target.checked }, e.target.checked ? "Skipping non-music parts" : "Playing videos in full");
     } else if (id === "set-region" || id === "set-language") {
