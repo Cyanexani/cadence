@@ -383,7 +383,7 @@ function onPlayerReady(event) {
   if (state.muted) event.target.mute();
   if (event.target !== players[0]) return;
   ytReady = true;
-  if (player === nativePlayer) return; // standing by in case a song won't play natively
+  if (onNative()) return; // standing by in case a song won't play natively
   playerReady = true;
   frontPlayer(player);
   if (pendingLoad) {
@@ -470,6 +470,9 @@ let nativeQueued; // ids of the songs the native player has queued after this on
 
 const nativeCall = (action, args = null) => window.__TAURI__.core.invoke("native_player", { action, args });
 
+// True while the native player is in charge (never on the web, where both are null at first).
+const onNative = () => Boolean(nativePlayer) && player === nativePlayer;
+
 function nativeWanted() {
   return Boolean(nativePlayer) && !nativeGaveUp && state.settings.nativeAudio !== false;
 }
@@ -481,13 +484,13 @@ function nativeTrack(track) {
 // Native for every song unless it's turned off or keeps failing; YouTube's player otherwise.
 function choosePlayer() {
   if (nativeWanted()) {
-    if (player === nativePlayer) return;
+    if (onNative()) return;
     if (fade) endFade();
     if (isUsable(player)) player.stopVideo();
     player = nativePlayer;
     playerReady = true;
     pendingLoad = null;
-  } else if (player === nativePlayer) {
+  } else if (onNative()) {
     nativePlayer.stopVideo();
     player = players[0] || null;
     playerReady = ytReady && Boolean(player);
@@ -587,7 +590,7 @@ function onNativeEvent(event, data) {
 
 // The native player went on to the song it had queued, without waiting for this page.
 function onNativeTransition(id) {
-  if (player !== nativePlayer || !id) return;
+  if (!onNative() || !id) return;
   const expected = upcomingIndex();
   const i = state.queue[expected]?.id === id ? expected : state.queue.findIndex((t, k) => k > state.index && t.id === id);
   accrueListen(); // the stretch since the page's last tick, which may be long in the background
@@ -604,7 +607,7 @@ function onNativeTransition(id) {
 }
 
 function onNativeError({ id, code, message }) {
-  if (player !== nativePlayer || !id || id !== nativePlayer.id) return;
+  if (!onNative() || !id || id !== nativePlayer.id) return;
   console.warn(`Native playback failed (${code}): ${message}`);
   nativePlayer.fails += 1;
   if (nativePlayer.fails >= NATIVE_FAILS_BEFORE_GIVING_UP && !nativeGaveUp) {
@@ -641,7 +644,7 @@ function nativeUpcoming() {
 
 // Keep the native player's queued songs in step with the queue, repeat mode and sleep timer.
 function syncNativeNext() {
-  if (!nativePlayer || player !== nativePlayer || !nativePlayer.id) return;
+  if (!onNative() || !nativePlayer.id) return;
   const upcoming = nativeUpcoming();
   const ids = upcoming.map((t) => t.id).join(",");
   if (ids === nativeQueued) return;
@@ -681,7 +684,7 @@ async function startNativePlayer() {
     return;
   }
   if (await adoptNativePlayback()) return;
-  if (current() && player === nativePlayer && !nativePlayer.id) {
+  if (current() && onNative() && !nativePlayer.id) {
     player.cueVideoById({ videoId: current().id, startSeconds: state.position || 0 });
   }
 }
@@ -690,18 +693,18 @@ async function startNativePlayer() {
 function onNativeSettingChanged() {
   nativeGaveUp = false;
   const track = current();
-  if (!track || nativeWanted() === (player === nativePlayer)) return;
+  if (!track || nativeWanted() === onNative()) return;
   const start = playerReady && player ? player.getCurrentTime() || state.position : state.position;
   load(track, { autoplay: state.playing, start });
 }
 
 function renderNativeMode() {
-  els.app.classList.toggle("native-audio", Boolean(nativePlayer) && player === nativePlayer);
+  els.app.classList.toggle("native-audio", onNative());
   renderQuality();
 }
 
 function renderQuality() {
-  const quality = player === nativePlayer ? nativePlayer?.quality : null;
+  const quality = onNative() ? nativePlayer.quality : null;
   els.npQuality.hidden = !quality;
   els.npQuality.textContent = quality || "";
 }
@@ -720,7 +723,7 @@ function stopTick() {
 function accrueListen() {
   const now = performance.now();
   if (state.playing && state.listen.track) {
-    const cap = player && player === nativePlayer ? NATIVE_MAX_TICK_GAP_MS : MAX_TICK_GAP_MS;
+    const cap = onNative() ? NATIVE_MAX_TICK_GAP_MS : MAX_TICK_GAP_MS;
     state.listen.seconds += Math.min(now - state.listen.last, cap) / 1000;
   }
   state.listen.last = now;
@@ -937,7 +940,7 @@ function upcomingIndex() {
 }
 
 function maybeCrossfade(t, d) {
-  if (player === nativePlayer) return; // songs follow on gaplessly there instead
+  if (onNative()) return; // songs follow on gaplessly there instead
   const seconds = Number(state.settings.crossfade) || 0;
   if (!seconds || fade || !state.playing || !d || d < seconds * MIN_FADE_TRACK_RATIO) return;
   if (d - t > seconds || state.sleep?.endOfSong) return;
