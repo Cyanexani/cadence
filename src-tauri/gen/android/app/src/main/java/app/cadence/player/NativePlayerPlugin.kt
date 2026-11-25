@@ -5,18 +5,38 @@ import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
-import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 
 @InvokeArg
-class LoadArgs {
+class SongArgs {
+  lateinit var slot: String
   lateinit var url: String
-  var userAgent: String = ""
+  var title: String = ""
+  var artist: String = ""
+  var art: String? = null
+  var loudnessDb: Double? = null
+
+  fun toSong() = Song(slot, url, title, artist, art, loudnessDb)
+}
+
+@InvokeArg
+class LoadArgs {
+  var gen: Int = 0
+  lateinit var slot: String
+  lateinit var url: String
   var startSeconds: Double = 0.0
   var autoplay: Boolean = true
   var title: String = ""
   var artist: String = ""
   var art: String? = null
+  var loudnessDb: Double? = null
+}
+
+@InvokeArg
+class QueueArgs {
+  var gen: Int = 0
+  var repeatOne: Boolean = false
+  var items: Array<SongArgs> = arrayOf()
 }
 
 @InvokeArg
@@ -27,6 +47,20 @@ class SeekArgs {
 @InvokeArg
 class VolumeArgs {
   var volume: Double = 1.0
+}
+
+@InvokeArg
+class SleepArgs {
+  var seconds: Int = 0
+}
+
+@InvokeArg
+class FxArgs {
+  var normalize: Boolean = false
+  var skipSilence: Boolean = false
+  var eqOn: Boolean = false
+  var gains: IntArray = intArrayOf()
+  var bands: IntArray = intArrayOf()
 }
 
 /** The page's audio player: plays the direct audio streams in [Engine], in the background too. */
@@ -47,9 +81,15 @@ class NativePlayerPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun load(invoke: Invoke) {
     val args = invoke.parseArgs(LoadArgs::class.java)
-    onMain(invoke) {
-      Engine.load(args.url, args.userAgent, (args.startSeconds * 1000).toLong(), args.autoplay, args.title, args.artist, args.art)
-    }
+    val song = Song(args.slot, args.url, args.title, args.artist, args.art, args.loudnessDb)
+    onMain(invoke) { Engine.load(args.gen, song, (args.startSeconds * 1000).toLong(), args.autoplay) }
+  }
+
+  @Command
+  fun queue(invoke: Invoke) {
+    val args = invoke.parseArgs(QueueArgs::class.java)
+    val songs = args.items.map { it.toSong() }
+    onMain(invoke) { Engine.queue(args.gen, songs, args.repeatOne) }
   }
 
   @Command
@@ -74,21 +114,23 @@ class NativePlayerPlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   @Command
+  fun sleep(invoke: Invoke) {
+    val args = invoke.parseArgs(SleepArgs::class.java)
+    onMain(invoke) { Engine.sleep(args.seconds) }
+  }
+
+  @Command
+  fun fx(invoke: Invoke) {
+    val args = invoke.parseArgs(FxArgs::class.java)
+    onMain(invoke) { Engine.fx(args.normalize, args.skipSilence, args.eqOn, args.gains.toList(), args.bands.toList()) }
+  }
+
+  @Command
   fun status(invoke: Invoke) {
     Engine.main.post {
       try {
         Engine.init(activity)
-        val out = JSObject()
-        for ((key, value) in Engine.status()) {
-          when (value) {
-            null -> Unit
-            is Boolean -> out.put(key, value)
-            is Int -> out.put(key, value)
-            is Double -> out.put(key, value)
-            else -> out.put(key, value.toString())
-          }
-        }
-        invoke.resolve(out)
+        invoke.resolveObject(Engine.status())
       } catch (e: Exception) {
         invoke.reject(e.message ?: "The audio player failed.")
       }

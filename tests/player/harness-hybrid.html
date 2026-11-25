@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8"><title>harness</title>
+<script>
+  const AUDIO = "http://127.0.0.1:8002";
+  window.state = { queue: [{ id: "AAAAAAAAAAA", title: "A" }, { id: "BBBBBBBBBBB", title: "B" }], index: 0 };
+  window.current = () => state.queue[state.index];
+  window.enc = encodeURIComponent;
+  window.api = async (path) => {
+    const id = new URL(path, location.href).searchParams.get("id");
+    if (id === "BADBADBADBA") throw new Error("nope");
+    return { src: `${AUDIO}/secret/${id}`, mime: "audio/wav", codec: "opus", bitrate: 160000, loudnessDb: 6, validUntil: Date.now() / 1000 + 3600 };
+  };
+  window.next = () => {}; window.prev = () => {};
+  window.events = [];
+</script>
+<script src="/engine.js"></script>
+<script>
+  window.fakeEmbeds = [];
+  window.YT = { Player: class {
+    constructor(slot, cfg) { this.slot = slot; this.cfg = cfg; this.calls = []; this.vol = null; this.muted = false; this.iframe = document.createElement("iframe"); fakeEmbeds.push(this); setTimeout(() => cfg.events.onReady(), 0); }
+    getIframe() { return this.iframe; }
+    loadVideoById(o) { this.calls.push(["load", o]); setTimeout(() => this.cfg.events.onStateChange({ data: 1 }), 5); }
+    cueVideoById(o) { this.calls.push(["cue", o]); }
+    playVideo() { this.calls.push(["play"]); } pauseVideo() { this.calls.push(["pause"]); }
+    seekTo(s) { this.calls.push(["seek", s]); } stopVideo() { this.calls.push(["stop"]); }
+    setVolume(v) { this.vol = v; } mute() { this.muted = true; } unMute() { this.muted = false; }
+    getCurrentTime() { return 7; } getDuration() { return 100; } getPlayerState() { return 1; }
+  } };
+  window.makeHybrid = (slot = "yt-a") => new HybridPlayer({
+    onReady: () => events.push(["ready"]),
+    onStateChange: (e) => events.push(["state", e.data, e.target === window.h]),
+    onError: (e) => events.push(["error", e.data]),
+    onQuality: (p, label) => events.push(["quality", label]),
+  }, (ev) => new ElementPlayer(ev), slot);
+  window.makePlayer = () => new ElementPlayer({
+    onReady: () => events.push(["ready"]),
+    onStateChange: (e) => events.push(["state", e.data]),
+    onError: (e) => events.push(["error", e.data]),
+    onQuality: (p, label) => events.push(["quality", label]),
+  });
+</script>

@@ -65,9 +65,11 @@
         <button class="icon-btn np-close" id="np-close" type="button" aria-label="Close now playing"><span data-icon="down"></span></button>
       </div>
       <div class="np-video">
+        <div class="np-cover" id="np-cover" aria-hidden="true"></div>
         <div id="yt-a"></div>
         <div id="yt-b"></div>
         <div class="np-empty"><span data-icon="logo"></span><p>Pick a song to start listening.</p></div>
+        <span class="np-quality" id="np-quality" title="The audio format and bitrate this song is playing at" hidden></span>
       </div>
       <div class="np-meta">
         <div class="np-text">
@@ -184,6 +186,7 @@
 
   <div class="toast glass-strong" id="toast" role="status" aria-live="polite"></div>
   <script src="store.js"></script>
+  <script src="engine.js"></script>
   <script src="app.js"></script>
   <script src="features.js"></script>
 </body>

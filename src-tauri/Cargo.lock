@@ -263,6 +263,7 @@ name = "cadence"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "httparse",
  "log",
  "rand 0.8.8",
  "regex",

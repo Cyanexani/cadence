@@ -1,0 +1,78 @@
+<!doctype html><meta charset="utf-8"><title>native harness</title>
+<script>
+  // A stand-in for the Kotlin Engine: a playlist that advances by itself, with the same commands and status fields.
+  const DUR = { AAAAAAAAAAA: 3, BBBBBBBBBBB: 2, CCCCCCCCCCC: 2, DDDDDDDDDDD: 2 };
+  const fake = {
+    log: [], gen: 0, list: [], index: 0, playing: false, wantsPlay: false, pos: 0, last: performance.now(),
+    command: null, sleepFired: false, error: null, failNext: 0, repeatOne: false, sleepAt: 0, delayLoad: 0,
+    idOf(item) { return item.url.split("/").pop(); },
+    tick() {
+      const now = performance.now(); const dt = (now - this.last) / 1000; this.last = now;
+      if (this.sleepAt && now >= this.sleepAt) { this.sleepAt = 0; this.wantsPlay = false; this.playing = false; this.sleepFired = true; }
+      if (!this.playing || !this.list.length) return;
+      this.pos += dt;
+      const dur = DUR[this.idOf(this.list[this.index])];
+      if (this.pos >= dur) {
+        if (this.repeatOne) { this.pos = 0; }
+        else if (this.index + 1 < this.list.length) { this.index++; this.pos = 0; }
+        else { this.pos = dur; this.playing = false; this.ended = true; }
+      }
+    },
+    async invoke(cmd, payload) {
+      if (cmd !== "native_player") throw new Error("unexpected " + cmd);
+      const { command, args } = payload; this.tick(); this.log.push([command, args]);
+      switch (command) {
+        case "load":
+          if (this.delayLoad) await new Promise((r) => setTimeout(r, this.delayLoad));
+          this.gen = args.gen; this.list = [{ slot: args.slot, url: args.url }]; this.index = 0; this.pos = args.startSeconds || 0;
+          this.wantsPlay = args.autoplay; this.playing = args.autoplay; this.ended = false; this.error = null; this.repeatOne = false;
+          if (this.failNext > 0) { this.failNext--; this.error = "ERROR_CODE_IO_BAD_HTTP_STATUS"; this.playing = false; }
+          return null;
+        case "queue":
+          if (args.gen !== this.gen) return null;
+          this.list = this.list.slice(0, this.index + 1).concat(args.items.map((i) => ({ slot: i.slot, url: i.url })));
+          this.repeatOne = args.repeatOne; return null;
+        case "play": this.wantsPlay = true; this.playing = true; this.ended = false; return null;
+        case "pause": this.wantsPlay = false; this.playing = false; return null;
+        case "stop": this.playing = false; return null;
+        case "seek": this.pos = args.seconds; return null;
+        case "sleep": this.sleepAt = args.seconds ? performance.now() + args.seconds * 1000 : 0; return null;
+        case "volume": case "fx": return null;
+        case "status": {
+          const item = this.list[this.index];
+          const out = { loadGen: this.gen, slot: item?.slot || null, state: this.ended ? "ended" : item ? "ready" : "idle", playing: this.playing, wantsPlay: this.wantsPlay,
+            position: this.pos, duration: item ? DUR[this.idOf(item)] : 0, error: this.error, command: this.command, sleepFired: this.sleepFired };
+          this.command = null; this.sleepFired = false; return out;
+        }
+      }
+      throw new Error("unknown command " + command);
+    },
+  };
+  window.fake = fake;
+  window.__TAURI__ = { core: { invoke: (c, p) => fake.invoke(c, p) } };
+  const TRACKS = ["AAAAAAAAAAA", "BBBBBBBBBBB", "CCCCCCCCCCC", "DDDDDDDDDDD"].map((id) => ({ id, title: "T" + id[0], artist: "Art" }));
+  window.TRACKS = TRACKS;
+  window.state = { queue: TRACKS.slice(), index: 0 };
+  window.current = () => state.queue[state.index];
+  window.enc = encodeURIComponent;
+  window.apiCalls = 0;
+  window.api = async (path) => {
+    apiCalls++;
+    const id = new URL(path, location.href).searchParams.get("id");
+    return { src: `http://127.0.0.1:1/token/${id}`, mime: "audio/webm", codec: "opus", bitrate: 160000, loudnessDb: 3, validUntil: Date.now() / 1000 + 3600 };
+  };
+  window.nextCalls = 0; window.prevCalls = 0;
+  window.next = () => { nextCalls++; }; window.prev = () => { prevCalls++; };
+  window.events = [];
+</script>
+<script src="/engine.js"></script>
+<script>
+  window.makePlayer = () => new NativePlayer({
+    onReady: () => events.push(["ready"]),
+    onStateChange: (e) => events.push(["state", e.data]),
+    onError: (e) => events.push(["error", e.data]),
+    onQuality: (p, label) => events.push(["quality", label]),
+    onAdvance: (track) => events.push(["advance", track.id]),
+    onSleep: () => events.push(["sleep"]),
+  });
+</script>

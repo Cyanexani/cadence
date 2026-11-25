@@ -68,3 +68,51 @@ async fn music_api_answers_like_the_python_core() {
 
     assert!(music.dispatch("/api/nope", HashMap::new()).await.is_err());
 }
+
+/// The local audio server end to end: ask YouTube for a song's best stream, then read it through
+/// the server the way a player does (ranged requests), including a seek near the end.
+/// YouTube ties each stream link to the IP that asked for it, so this needs a plain connection;
+/// behind a proxy that changes the source address per connection every read is refused (403).
+/// Run it with `cargo test --test smoke songs_stream -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a connection whose IP stays the same between youtube.com and googlevideo.com"]
+async fn songs_stream_through_the_local_audio_server() {
+    let music = std::sync::Arc::new(Music::new(std::env::temp_dir().join("cadence-smoke-audio")).expect("client starts"));
+    let (listener, port) = cadence_lib::stream::bind().await.expect("a free port");
+    let secret = "smokesecret";
+    music.set_audio_base(format!("http://127.0.0.1:{port}/{secret}"));
+    tokio::spawn(cadence_lib::stream::run(listener, secret.to_string(), music.clone()));
+
+    let info = call(&music, "/api/stream", &[("id", "1_O_T6Aq85E")]).await;
+    println!(
+        "stream: {} {} kbps {} bytes loudness {} valid until {}",
+        info["codec"], info["bitrate"].as_u64().unwrap_or(0) / 1000, info["size"], info["loudnessDb"], info["validUntil"]
+    );
+    let size = info["size"].as_u64().expect("size");
+    assert!(size > 100_000, "a song is bigger than 100 kB");
+    assert!(info["bitrate"].as_u64().unwrap_or(0) >= 100_000, "best stream is at least 100 kbps");
+    let src = info["src"].as_str().expect("src");
+
+    let client = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    let start = client.get(src).header("Range", "bytes=0-199999").send().await.expect("answers");
+    let status = start.status().as_u16();
+    let bytes = start.bytes().await.expect("body");
+    assert_eq!(status, 206, "the server said: {}", String::from_utf8_lossy(&bytes));
+    assert_eq!(bytes.len(), 200_000);
+    println!("first 200 kB in {:?}, starts {:02x?}", started.elapsed(), &bytes[..4]);
+
+    // A seek: the last 50 kB, open-ended.
+    let from = size - 50_000;
+    let tail = client.get(src).header("Range", format!("bytes={from}-")).send().await.expect("answers");
+    assert_eq!(tail.status().as_u16(), 206);
+    assert_eq!(tail.bytes().await.expect("body").len(), 50_000);
+
+    // Throughput over a few chunks: a throttled link would crawl.
+    let started = std::time::Instant::now();
+    let long = client.get(src).header("Range", "bytes=0-3999999").send().await.expect("answers");
+    let body = long.bytes().await.expect("body");
+    let secs = started.elapsed().as_secs_f64();
+    println!("{} bytes in {secs:.2}s = {:.0} kB/s", body.len(), body.len() as f64 / secs / 1000.0);
+    assert!(body.len() as u64 >= 3_999_999.min(size - 1));
+}

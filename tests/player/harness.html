@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>harness</title>
+<script>
+  const AUDIO = "http://127.0.0.1:8002";
+  window.state = { queue: [{ id: "AAAAAAAAAAA", title: "A" }, { id: "BBBBBBBBBBB", title: "B" }], index: 0 };
+  window.current = () => state.queue[state.index];
+  window.enc = encodeURIComponent;
+  window.api = async (path) => {
+    const id = new URL(path, location.href).searchParams.get("id");
+    if (id === "BADBADBADBA") throw new Error("nope");
+    return { src: `${AUDIO}/secret/${id}`, mime: "audio/wav", codec: "opus", bitrate: 160000, loudnessDb: 6, validUntil: Date.now() / 1000 + 3600 };
+  };
+  window.next = () => {}; window.prev = () => {};
+  window.events = [];
+</script>
+<script src="/engine.js"></script>
+<script>
+  window.makePlayer = () => new ElementPlayer({
+    onReady: () => events.push(["ready"]),
+    onStateChange: (e) => events.push(["state", e.data]),
+    onError: (e) => events.push(["error", e.data]),
+    onQuality: (p, label) => events.push(["quality", label]),
+  });
+</script>

@@ -12,7 +12,10 @@ playing. It runs as a web app, on Vercel, on Android and on Windows, all from on
 |---|---|
 | ![An album page with the artwork-tinted glass](docs/album.jpg) | ![Phone layout with a song's menu](docs/phone-menu.jpg) |
 
-On the web and Windows, every song plays through YouTube's own embedded player. The Android app streams each song's highest-bitrate audio directly (nothing is saved to your device), so it keeps playing in the background. Nothing is downloaded or ripped. Your
+On the web, every song plays through YouTube's own embedded player. The Android and Windows apps
+stream each song's highest-bitrate audio directly (nothing is saved to your device), which is what
+lets them keep playing with the screen off, show the real format and bitrate, and offer an
+equalizer. Nothing is downloaded or ripped. Your
 library (likes, history, playlists, settings) is stored on your device, never on a server. Use
 **Settings › Save a backup** to keep a copy.
 
@@ -33,7 +36,8 @@ Or run the web version yourself (below).
 - Search songs, videos, albums, artists, playlists and podcasts, with live suggestions and recent searches
 - Home feed, moods & genres (with a one-tap **Mix** that blends several playlists), artist and album pages
 - Queue with play next / add to queue, shuffle, repeat (off / all / one), and an endless radio when it runs out
-- **Crossfade** (1–12 s) using two YouTube players
+- **Crossfade** (1–12 s) using two players (web and Windows)
+- **Sound** (Android and Windows): always the best audio stream YouTube offers, its format and bitrate shown in *Now playing*, volume evening, a 5-band equalizer with presets, and skip silence on Android
 - **Synced lyrics** from LRCLIB in the side panel and full screen; tap a line to jump there
 - **SponsorBlock** skipping of non-music parts in music videos (looked up by hash prefix, so it never sees the exact video)
 - Sleep timer (15–90 minutes or end of song)
@@ -45,6 +49,7 @@ Or run the web version yourself (below).
 - Region and language for YouTube Music, remappable keyboard shortcuts, backup and restore
 - Floating mini player (Chrome/Edge), restored queue and position after a restart
 - Songs whose owners block playback outside YouTube are swapped for another upload, or skipped
+- The apps fall back to YouTube's embedded player for a song that can't be streamed directly, so music never just stops
 
 ## Where it runs
 
@@ -165,31 +170,47 @@ finish, then copy `src-tauri\target\aarch64-linux-android\release\libcadence_lib
 The release APK comes out unsigned; sign it (zipalign, then apksigner) before installing.
 
 The Rust API is tested live with `cargo test --test smoke -- --nocapture` in `src-tauri/`, and its
-helpers with `cargo test --lib`.
+helpers (including the local audio server's ranges, chunking and link refresh) with
+`cargo test --lib`. The audio-streaming smoke test needs a connection whose IP stays the same
+between youtube.com and googlevideo.com: `cargo test --test smoke songs_stream -- --ignored --nocapture`.
+
+The page's players (desktop `<audio>`, the Android player's page side, the embed fallback, and the
+whole page in desktop mode) are tested in headless Chromium with `tests/player/run.sh`; it needs
+Python 3, Node and Playwright (`npm install --no-save playwright`).
 
 ## Known limits
 
-- **Background playback:** works in the Android app (a foreground media service with a
-  notification and lock-screen controls). The web and Windows versions use YouTube's embedded
-  player, which pauses when the page is hidden.
-- **Audio quality:** the Android app picks the highest-bitrate stream YouTube offers (up to about
-  256 kbps Opus/AAC). YouTube has no lossless audio, so FLAC isn't possible. The embedded player
-  has no audio-quality setting, so web and Windows use YouTube's default.
+- **Background playback:** works in the Android app: the audio plays in a foreground media service
+  (ExoPlayer) with a notification and lock-screen controls, and it queues the next few songs
+  itself, so songs change while the screen is off. The web version uses YouTube's embedded player,
+  which mobile browsers pause when the page is hidden; a browser can't fetch YouTube audio itself
+  (cross-origin rules, and stream links are tied to the IP that asked for them), so the web
+  version would need a server that fetches and relays the audio. It doesn't have one.
+- **Audio quality:** the Android and Windows apps pick the highest-bitrate stream YouTube offers
+  (up to about 256 kbps Opus/AAC). YouTube has no lossless audio, so FLAC isn't possible. The
+  embedded player has no audio-quality setting (`setPlaybackQuality` is deprecated and does
+  nothing), so the web version, and any song that falls back to the embed, use YouTube's default.
+- **Direct streams rely on YouTube's iOS client**, which rustypipe can still use without a PO
+  token. If YouTube changes that, songs fall back to the embedded player (and pause in the
+  background on Android) until rustypipe catches up.
 - **The apps have no podcasts**, and build Home from charts and new releases (even when signed in),
   because rustypipe has no podcast or personalised home endpoints.
-- **Not available yet:** equalizer, loudness normalisation, skip-silence, offline downloads, and
-  crossfade on Android.
+- **Not available yet:** offline downloads, crossfade on Android, and the equalizer and volume
+  evening on the web.
 - **Backups on Android:** *Save a backup* uses a browser download, which the Android webview may
   ignore. Restore works.
 
 ## Layout
 
 ```
-public/          the UI shared by every version (index.html, app.css, store.js, app.js, features.js)
+public/          the UI shared by every version (index.html, app.css, store.js, engine.js, app.js, features.js)
 core.py          stateless music API (YouTube Music, LRCLIB, SponsorBlock, Google device sign-in)
 server.py        local server, plus the WSGI app Vercel runs: public/ + core.py
-src-tauri/       Android and Windows app; src/music.rs and src/extras.rs are the Rust port of core.py
-src-tauri/gen/android/app/src/main/java/app/cadence/player/   in-app Google sign-in (Kotlin)
+src-tauri/       Android and Windows app; src/music.rs and src/extras.rs are the Rust port of core.py,
+                 src/stream.rs is the local audio server that players read songs from
+src-tauri/gen/android/app/src/main/java/app/cadence/player/   in-app Google sign-in, the audio player and its
+                 background service (Kotlin)
+tests/player/    browser tests of the page's players (run.sh)
 src-tauri/vendor/rquickjs-sys   patched dependency that adds Android bindings (see its CADENCE-PATCH.md)
 ```
 

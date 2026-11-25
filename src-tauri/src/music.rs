@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
@@ -12,13 +12,14 @@ use rand::seq::SliceRandom;
 use regex::Regex;
 use rustypipe::client::{RustyPipe, RustyPipeQuery};
 use rustypipe::model::{
-    AlbumItem, AlbumType, ArtistId, ArtistItem, MusicPlaylistItem, Thumbnail, TrackItem, TrackType,
+    AlbumItem, AlbumType, ArtistId, ArtistItem, AudioCodec, MusicPlaylistItem, Thumbnail, TrackItem, TrackType,
 };
 use rustypipe::param::{Country, Language, StreamFilter};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
 use crate::extras;
+use crate::stream::{self, FetchError};
 
 const CACHE_TTL: Duration = Duration::from_secs(600);
 const CACHE_MAX_ENTRIES: usize = 1000;
@@ -32,6 +33,11 @@ const YTM_ORIGIN: &str = "https://music.youtube.com";
 const BROWSER_USER_AGENT: &str =
     "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
 const VIDEO_ID_LEN: usize = 11;
+/// A stream link is replaced this long before YouTube says it expires.
+const STREAM_MARGIN_SECONDS: i64 = 120;
+const STREAM_CACHE_MAX: usize = 64;
+/// A link asked for again within this long was just replaced by someone else; reuse it.
+const STREAM_REFRESH_COOLDOWN: Duration = Duration::from_secs(5);
 // Liked Music and Episodes for Later have their own places in the app.
 const HIDDEN_ACCOUNT_PLAYLISTS: [&str; 2] = ["LM", "SE"];
 const CACHEABLE: [&str; 10] = [
@@ -44,10 +50,35 @@ static SQUARE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"=s\d+$").e
 
 pub type ApiResult = Result<Value, String>;
 
+/// A song's best audio stream: the link on YouTube's servers and what the players need to know.
+#[derive(Clone, Debug)]
+pub struct StreamInfo {
+    pub url: String,
+    pub mime: String,
+    /// "opus", "mp4a" (AAC) and so on.
+    pub codec: String,
+    /// File size in bytes.
+    pub size: u64,
+    /// Bits per second.
+    pub bitrate: u32,
+    /// The user agent YouTube expects with `url`.
+    pub user_agent: String,
+    /// When the link stops working, in unix seconds.
+    pub valid_until: i64,
+    /// How much louder than the reference level the song is (dB); `None` when YouTube doesn't say.
+    pub loudness_db: Option<f32>,
+}
+
+type StreamSlot = Arc<tokio::sync::Mutex<Option<(StreamInfo, Instant)>>>;
+
 pub struct Music {
     rp: RustyPipe,
     pub http: reqwest::Client,
     cache: Mutex<HashMap<String, (Instant, Value)>>,
+    /// One slot per song, so two requests for the same song share one lookup.
+    streams: Mutex<HashMap<String, StreamSlot>>,
+    /// `http://127.0.0.1:<port>/<secret>` of the local audio server, once it is running.
+    audio_base: OnceLock<String>,
     /// Google session cookies from in-app sign-in; also kept by rustypipe in its own cache.
     cookie: Mutex<Option<String>>,
     cookie_file: PathBuf,
@@ -80,7 +111,15 @@ impl Music {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| format!("Can't start the HTTP client: {e}"))?;
-        Ok(Self { rp, http, cache: Mutex::new(HashMap::new()), cookie: Mutex::new(cookie), cookie_file })
+        Ok(Self {
+            rp,
+            http,
+            cache: Mutex::new(HashMap::new()),
+            streams: Mutex::new(HashMap::new()),
+            audio_base: OnceLock::new(),
+            cookie: Mutex::new(cookie),
+            cookie_file,
+        })
     }
 
     fn query(&self, language: Option<&str>, region: Option<&str>) -> RustyPipeQuery {
@@ -114,7 +153,7 @@ impl Music {
             "/api/playlist" => playlist(&q, need(&params, "id")?).await,
             "/api/artist" => artist(&q, need(&params, "id")?).await,
             "/api/radio" => radio(&q, need(&params, "id")?).await,
-            "/api/stream" => audio_stream(&q, need(&params, "id")?).await,
+            "/api/stream" => self.stream_json(need(&params, "id")?).await,
             "/api/alternate" => alternate(&q, need(&params, "q")?, params.get("exclude").map_or("", String::as_str)).await,
             "/api/moods" => moods(&q).await,
             "/api/mood" => mood(&q, need(&params, "params")?).await,
@@ -239,6 +278,52 @@ impl Music {
             return Err("YouTube Music didn't accept your sign-in. Sign out and sign in again.".to_string());
         }
         response.error_for_status().map_err(upstream)?.json().await.map_err(upstream)
+    }
+
+    /// Where the local audio server is, once it has started. Players read songs from here.
+    pub fn set_audio_base(&self, base: String) {
+        let _ = self.audio_base.set(base);
+    }
+
+    /// The best audio stream for a song. Remembered until shortly before YouTube's link expires;
+    /// `fresh` asks again because the remembered link was refused.
+    pub async fn stream_info(&self, id: &str, fresh: bool) -> Result<StreamInfo, String> {
+        if !stream::is_video_id(id) {
+            return Err("That isn't a YouTube video id.".to_string());
+        }
+        let slot = {
+            let mut streams = self.streams.lock().map_err(|_| "The stream list is unavailable.".to_string())?;
+            if streams.len() >= STREAM_CACHE_MAX && !streams.contains_key(id) {
+                streams.clear();
+            }
+            streams.entry(id.to_string()).or_default().clone()
+        };
+        let mut slot = slot.lock().await;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        if let Some((info, fetched)) = slot.as_ref() {
+            let usable = info.valid_until - STREAM_MARGIN_SECONDS > now;
+            if usable && (!fresh || fetched.elapsed() < STREAM_REFRESH_COOLDOWN) {
+                return Ok(info.clone());
+            }
+        }
+        let info = fetch_stream_info(&self.query(None, None), id).await?;
+        *slot = Some((info.clone(), Instant::now()));
+        Ok(info)
+    }
+
+    /// `/api/stream`: where the page's player reads a song, and what it will hear.
+    async fn stream_json(&self, id: &str) -> ApiResult {
+        let info = self.stream_info(id, false).await?;
+        let base = self.audio_base.get().ok_or_else(|| "The audio player isn't running.".to_string())?;
+        Ok(json!({
+            "src": format!("{base}/{id}"),
+            "mime": info.mime,
+            "codec": info.codec,
+            "bitrate": info.bitrate,
+            "size": info.size,
+            "loudnessDb": info.loudness_db,
+            "validUntil": info.valid_until,
+        }))
     }
 
     fn cached(&self, key: &str) -> Option<Value> {
@@ -531,20 +616,60 @@ async fn radio(q: &RustyPipeQuery, id: &str) -> ApiResult {
     Ok(json!({ "items": items }))
 }
 
-/// The top-bitrate audio stream for the native player. The URL expires (`validUntil`, unix
-/// seconds) and the player must send `userAgent` with it, since YouTube checks the client.
-async fn audio_stream(q: &RustyPipeQuery, id: &str) -> ApiResult {
+/// Asks YouTube for the song's streams and picks the highest-bitrate audio one.
+async fn fetch_stream_info(q: &RustyPipeQuery, id: &str) -> Result<StreamInfo, String> {
     let player = q.player(id).await.map_err(upstream)?;
     let stream = player
         .select_audio_stream(&StreamFilter::new())
         .ok_or_else(|| "YouTube didn't offer an audio stream for this song.".to_string())?;
-    Ok(json!({
-        "url": stream.url,
-        "mime": stream.mime,
-        "bitrate": stream.bitrate,
-        "userAgent": q.user_agent(player.client_type).into_owned(),
-        "validUntil": player.valid_until.unix_timestamp(),
-    }))
+    let codec = match stream.codec {
+        AudioCodec::Opus => "opus",
+        AudioCodec::Mp4a => "mp4a",
+        AudioCodec::Ac3 => "ac-3",
+        AudioCodec::Ec3 => "ec-3",
+        _ => "",
+    };
+    Ok(StreamInfo {
+        url: stream.url.clone(),
+        mime: stream.mime.clone(),
+        codec: codec.to_string(),
+        size: stream.size,
+        bitrate: stream.bitrate,
+        user_agent: q.user_agent(player.client_type).into_owned(),
+        valid_until: player.valid_until.unix_timestamp(),
+        loudness_db: stream.loudness_db,
+    })
+}
+
+/// The audio server reads songs through here: ranged requests to YouTube with the right headers.
+impl stream::Source for Music {
+    async fn info(&self, id: &str, fresh: bool) -> Result<StreamInfo, String> {
+        self.stream_info(id, fresh).await
+    }
+
+    async fn fetch(&self, info: &StreamInfo, start: u64, end: u64) -> Result<Vec<u8>, FetchError> {
+        let response = self
+            .http
+            .get(&info.url)
+            .header(reqwest::header::USER_AGENT, &info.user_agent)
+            .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
+            .send()
+            .await
+            .map_err(|_| FetchError::Failed)?;
+        let status = response.status().as_u16();
+        match status {
+            200 | 206 => {}
+            403 | 404 | 410 => return Err(FetchError::Expired),
+            _ => return Err(FetchError::Failed),
+        }
+        let bytes = response.bytes().await.map_err(|_| FetchError::Failed)?;
+        if status == 200 {
+            // The server ignored the range and sent the whole file: keep the part that was asked for.
+            let (from, to) = (start as usize, (end as usize).saturating_add(1).min(bytes.len()));
+            return bytes.get(from..to).map(<[u8]>::to_vec).ok_or(FetchError::Failed);
+        }
+        Ok(bytes.to_vec())
+    }
 }
 
 // Some uploads block embedding; another upload of the same song usually plays.

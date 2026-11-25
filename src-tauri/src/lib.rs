@@ -1,7 +1,9 @@
 mod extras;
 pub mod music;
+pub mod stream;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 use tauri::Manager;
@@ -17,7 +19,7 @@ const ACCOUNT_PATHS: [&str; 5] = ["/api/account", "/api/liked", "/api/account-pl
 /// X-Cadence-* headers) is unused here: the app signs in with Google's own page instead.
 #[tauri::command]
 async fn api(
-    music: tauri::State<'_, Music>,
+    music: tauri::State<'_, Arc<Music>>,
     path: String,
     params: HashMap<String, String>,
     body: Option<Value>,
@@ -40,7 +42,7 @@ struct LoginResult {
 
 /// Opens Google's own sign-in page inside the app and keeps the resulting YouTube Music session.
 #[tauri::command]
-async fn google_sign_in(app: tauri::AppHandle, music: tauri::State<'_, Music>) -> Result<Value, String> {
+async fn google_sign_in(app: tauri::AppHandle, music: tauri::State<'_, Arc<Music>>) -> Result<Value, String> {
     let cookie = native_sign_in(&app).await?;
     music.sign_in_with_cookie(cookie).await
 }
@@ -107,7 +109,7 @@ async fn native_sign_in(_app: &tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn google_sign_out(app: tauri::AppHandle, music: tauri::State<'_, Music>) -> Result<(), String> {
+async fn google_sign_out(app: tauri::AppHandle, music: tauri::State<'_, Arc<Music>>) -> Result<(), String> {
     music.sign_out().await;
     #[cfg(target_os = "android")]
     {
@@ -123,11 +125,11 @@ async fn google_sign_out(app: tauri::AppHandle, music: tauri::State<'_, Music>) 
 struct NativePlayer(tauri::plugin::PluginHandle<tauri::Wry>);
 
 /// The Android audio player (ExoPlayer in a foreground service). `command` is one of the
-/// plugin's commands (load, play, pause, stop, seek, volume, status); other platforms play
-/// through YouTube's embedded player in the page instead.
+/// plugin's commands (see NativePlayerPlugin.kt); the desktop app plays through the page's own
+/// audio elements instead.
 #[tauri::command]
 async fn native_player(app: tauri::AppHandle, command: String, args: Option<Value>) -> Result<Value, String> {
-    const COMMANDS: [&str; 7] = ["load", "play", "pause", "stop", "seek", "volume", "status"];
+    const COMMANDS: [&str; 10] = ["load", "queue", "play", "pause", "stop", "seek", "volume", "sleep", "fx", "status"];
     if !COMMANDS.contains(&command.as_str()) {
         return Err("No such player command.".to_string());
     }
@@ -160,6 +162,16 @@ fn login_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
+/// Starts the audio server that players read songs from: on this device only, behind a secret
+/// in the address so other apps can't use it.
+fn start_audio_server(music: &Arc<Music>) -> Result<(), Box<dyn std::error::Error>> {
+    let (listener, port) = tauri::async_runtime::block_on(stream::bind())?;
+    let secret = format!("{:032x}", rand::random::<u128>());
+    music.set_audio_base(format!("http://127.0.0.1:{port}/{secret}"));
+    tauri::async_runtime::spawn(stream::run(listener, secret, music.clone()));
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -169,7 +181,9 @@ pub fn run() {
                 app.handle().plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build())?;
             }
             let storage = app.path().app_cache_dir()?.join("rustypipe");
-            app.manage(Music::new(storage)?);
+            let music = Arc::new(Music::new(storage)?);
+            start_audio_server(&music)?;
+            app.manage(music);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![api, google_sign_in, google_sign_out, native_player])

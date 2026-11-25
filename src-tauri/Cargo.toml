@@ -24,7 +24,8 @@ tauri-plugin-log = "2"
 rustypipe = { version = "0.11.4", default-features = false, features = ["rustls-tls-webpki-roots", "userdata"] }
 sha1 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "net", "io-util", "rt"] }
+httparse = "1"
 futures = "0.3"
 sha2 = "0.10"
 rand = "0.8"

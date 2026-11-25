@@ -505,6 +505,39 @@ function settingRow(label, help, control, id = "") {
   return `<div class="set-row"><div class="set-text"><label class="set-label"${id ? ` for="${id}"` : ""}>${label}</label>${help ? `<p class="set-help">${help}</p>` : ""}</div><div class="set-control">${control}</div></div>`;
 }
 
+const fmtDb = (n) => `${n > 0 ? "+" : ""}${n} dB`;
+const fmtHz = (hz) => (hz >= 1000 ? `${hz / 1000} kHz` : `${hz} Hz`);
+const eqPresetFor = (gains) => Object.entries(EQ_PRESETS).find(([, p]) => p.gains.every((g, i) => g === gains[i]))?.[0] || "custom";
+
+// Sound settings of the apps that play the audio themselves: always the best stream YouTube offers,
+// evened-out volume, silence skipping (Android) and an equalizer.
+function soundSettings(s) {
+  const eq = audioFx.eq;
+  const presetOptions = [["custom", "Custom"], ...Object.entries(EQ_PRESETS).map(([key, p]) => [key, p.label])]
+    .map(([key, label]) => `<option value="${key}"${eqPresetFor(eq.gains) === key ? " selected" : ""}>${esc(label)}</option>`)
+    .join("");
+  const bands = EQ_BANDS.map((hz, i) => settingRow(fmtHz(hz), "",
+    `<input type="range" class="eq-slider" id="set-eq-${i}" min="${-EQ_RANGE_DB}" max="${EQ_RANGE_DB}" step="1" value="${eq.gains[i]}"><output id="set-eq-out-${i}">${fmtDb(eq.gains[i])}</output>`, `set-eq-${i}`)).join("");
+  return `<section class="settings glass-inset"><h2>Sound</h2>
+      <p class="set-help">Cadence always plays the highest-bitrate audio YouTube offers for each song${NATIVE_AUDIO ? " and keeps playing with the screen off" : ""}. The Now playing panel shows the format and bitrate of the current song.</p>
+      ${settingRow("Even out volume", "Turns down songs YouTube says are louder than average, so every song sounds equally loud.",
+        `<input type="checkbox" class="switch" role="switch" id="set-normalize"${s.normalize ? " checked" : ""}>`, "set-normalize")}
+      ${NATIVE_AUDIO ? settingRow("Skip silence", "Jumps over silent stretches inside a song.",
+        `<input type="checkbox" class="switch" role="switch" id="set-skip-silence"${s.skipSilence ? " checked" : ""}>`, "set-skip-silence") : ""}
+      ${settingRow("Equalizer", "Shape the sound by frequency.",
+        `<input type="checkbox" class="switch" role="switch" id="set-eq-on"${eq.on ? " checked" : ""}>`, "set-eq-on")}
+      ${settingRow("Preset", "", `<select id="set-eq-preset">${presetOptions}</select>`, "set-eq-preset")}
+      ${bands}
+    </section>`;
+}
+
+function readEq() {
+  return {
+    on: document.getElementById("set-eq-on").checked,
+    gains: EQ_BANDS.map((_, i) => Number(document.getElementById(`set-eq-${i}`).value)),
+  };
+}
+
 function renderSettings() {
   const s = state.settings;
   const crossfade = Number(s.crossfade) || 0;
@@ -519,14 +552,15 @@ function renderSettings() {
     <section class="settings glass-inset"><h2>Google account</h2><div id="account-section"></div></section>
     <section class="settings glass-inset"><h2>Playback</h2>
       ${NATIVE_AUDIO
-        ? `<p class="set-help">Audio quality: Cadence always plays the highest-bitrate audio stream YouTube offers for each song, and keeps playing in the background.</p>`
-        : settingRow("Crossfade", "Fade the next song in while this one fades out. Uses a second YouTube player.",
+        ? ""
+        : settingRow("Crossfade", `Fade the next song in while this one fades out. Uses a second ${DIRECT_AUDIO ? "audio" : "YouTube"} player.`,
           `<input type="range" id="set-crossfade" min="0" max="${CROSSFADE_MAX_SECONDS}" step="1" value="${crossfade}"><output id="set-crossfade-out">${crossfade ? `${crossfade} s` : "Off"}</output>`, "set-crossfade")}
       ${settingRow("Keep playing similar songs", "When the queue runs out, start a radio from the last song.",
         `<input type="checkbox" class="switch" role="switch" id="set-autoplay"${state.autoplay ? " checked" : ""}>`, "set-autoplay")}
       ${settingRow("Skip non-music parts", "Uses SponsorBlock to jump over intros, sponsor reads and talking in music videos.",
         `<input type="checkbox" class="switch" role="switch" id="set-sponsorblock"${s.sponsorblock !== false ? " checked" : ""}>`, "set-sponsorblock")}
     </section>
+    ${DIRECT_AUDIO ? soundSettings(s) : ""}
     <section class="settings glass-inset"><h2>Content</h2>
       ${settingRow("Region", "Which country's charts, new releases and recommendations you see.", `<select id="set-region">${regionOptions}</select>`, "set-region")}
       ${settingRow("Language", "Language for YouTube Music titles and shelves.", `<select id="set-language">${languageOptions}</select>`, "set-language")}
@@ -541,10 +575,11 @@ function renderSettings() {
       <div class="hero-actions"><button class="btn" type="button" data-export>Save a backup</button><button class="btn" type="button" data-import>Restore a backup</button><button class="btn" type="button" data-clear-searches>Clear search history</button></div>
     </section>
     <section class="settings glass-inset"><h2>How Cadence plays music</h2>
-      <p class="set-help">Search and browsing come from YouTube Music, and every song plays through YouTube's own embedded player (in the Android app, as a direct audio stream), so nothing is saved to your device. Lyrics come from LRCLIB and skip segments from SponsorBlock. Songs whose owners block playback outside YouTube are swapped for another upload or skipped.</p>
+      <p class="set-help">Search and browsing come from YouTube Music, and on the web every song plays through YouTube's own embedded player, which has no audio-quality or equalizer controls. The Android and Windows apps stream each song's best audio directly instead (and fall back to the embedded player for a song that can't be streamed). Nothing is saved to your device. Lyrics come from LRCLIB and skip segments from SponsorBlock. Songs whose owners block playback outside YouTube are swapped for another upload or skipped.</p>
     </section>`);
   const fadeSlider = document.getElementById("set-crossfade");
   if (fadeSlider) setFill(fadeSlider);
+  document.querySelectorAll(".eq-slider").forEach(setFill);
   renderAccountSection();
 }
 
@@ -772,6 +807,17 @@ function bindFeatureEvents() {
   });
 
   els.view.addEventListener("input", (e) => {
+    const band = /^set-eq-(\d)$/.exec(e.target.id);
+    if (band) {
+      // Heard while dragging; saved when let go.
+      const i = Number(band[1]);
+      document.getElementById(`set-eq-out-${i}`).textContent = fmtDb(Number(e.target.value));
+      setFill(e.target);
+      const eq = readEq();
+      audioFx.configure({ ...state.settings, eq });
+      document.getElementById("set-eq-preset").value = eqPresetFor(eq.gains);
+      return;
+    }
     if (e.target.id === "set-crossfade") {
       const n = Number(e.target.value);
       document.getElementById("set-crossfade-out").textContent = n ? `${n} s` : "Off";
@@ -784,10 +830,28 @@ function bindFeatureEvents() {
     if (id === "set-crossfade") {
       const n = Number(e.target.value);
       await saveSettings({ crossfade: n }, n ? `Crossfade: ${n} seconds` : "Crossfade off");
+    } else if (id === "set-normalize") {
+      await saveSettings({ normalize: e.target.checked }, e.target.checked ? "Songs are evened out" : "Songs play at their own loudness");
+    } else if (id === "set-skip-silence") {
+      await saveSettings({ skipSilence: e.target.checked }, e.target.checked ? "Skipping silence" : "Playing silence too");
+    } else if (id === "set-eq-on" || /^set-eq-\d$/.test(id)) {
+      await saveSettings({ eq: readEq() });
+    } else if (id === "set-eq-preset") {
+      const preset = EQ_PRESETS[e.target.value];
+      if (!preset) return;
+      preset.gains.forEach((gain, i) => {
+        const slider = document.getElementById(`set-eq-${i}`);
+        slider.value = gain;
+        setFill(slider);
+        document.getElementById(`set-eq-out-${i}`).textContent = fmtDb(gain);
+      });
+      document.getElementById("set-eq-on").checked = true;
+      await saveSettings({ eq: readEq() }, `Equalizer: ${preset.label}`);
     } else if (id === "set-autoplay") {
       state.autoplay = e.target.checked;
       els.autoplay.checked = state.autoplay;
       save();
+      syncUpcoming();
       toast(state.autoplay ? "Similar songs play when the queue ends" : "Playback stops when the queue ends");
     } else if (id === "set-sync-history") {
       await saveSettings({ syncHistory: e.target.checked }, e.target.checked

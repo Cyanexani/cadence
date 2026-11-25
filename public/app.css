@@ -465,6 +465,32 @@ svg { width: 20px; height: 20px; flex: none; }
 }
 .np-video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; opacity: 0; transition: opacity .9s ease; }
 .np-video iframe.front { z-index: 1; opacity: 1; }
+/* Apps that play the audio themselves show the cover art where the video would be. */
+.np-cover { display: none; position: absolute; inset: 0; justify-content: center; background: radial-gradient(circle at 50% 40%, #2b2b36, #000 75%); }
+.direct-audio .np-cover { display: flex; }
+.np-cover img { height: 100%; width: auto; max-width: none; aspect-ratio: 1; object-fit: cover; }
+.np-quality {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 2;
+  max-width: calc(100% - 20px);
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / .6);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: .01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  backdrop-filter: blur(6px);
+}
+.np-quality[hidden] { display: none; }
+.eq-slider { width: 160px; }
+.set-control .eq-slider + output { width: 54px; text-align: right; }
 .np-empty {
   position: absolute;
   inset: 0;
