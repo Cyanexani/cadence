@@ -19,3 +19,6 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# The page reaches the audio player and its service by name and by reflection.
+-keep class app.cadence.player.** { *; }
+-keep class androidx.media3.** { *; }

@@ -12,7 +12,7 @@ playing. It runs as a web app, on Vercel, on Android and on Windows, all from on
 |---|---|
 | ![An album page with the artwork-tinted glass](docs/album.jpg) | ![Phone layout with a song's menu](docs/phone-menu.jpg) |
 
-Every song plays through YouTube's own embedded player, so nothing is downloaded or ripped. Your
+On the web and Windows, every song plays through YouTube's own embedded player. The Android app streams each song's highest-bitrate audio directly (nothing is saved to your device), so it keeps playing in the background. Nothing is downloaded or ripped. Your
 library (likes, history, playlists, settings) is stored on your device, never on a server. Use
 **Settings › Save a backup** to keep a copy.
 
@@ -169,12 +169,16 @@ helpers with `cargo test --lib`.
 
 ## Known limits
 
-- **Background playback:** the YouTube player pauses when the Android app goes to the background
-  or the screen turns off. YouTube only allows that with YouTube Premium in its own apps.
+- **Background playback:** works in the Android app (a foreground media service with a
+  notification and lock-screen controls). The web and Windows versions use YouTube's embedded
+  player, which pauses when the page is hidden.
+- **Audio quality:** the Android app picks the highest-bitrate stream YouTube offers (up to about
+  256 kbps Opus/AAC). YouTube has no lossless audio, so FLAC isn't possible. The embedded player
+  has no audio-quality setting, so web and Windows use YouTube's default.
 - **The apps have no podcasts**, and build Home from charts and new releases (even when signed in),
   because rustypipe has no podcast or personalised home endpoints.
-- **Not available**, because they need the raw audio stream: equalizer, loudness normalisation,
-  skip-silence, offline downloads.
+- **Not available yet:** equalizer, loudness normalisation, skip-silence, offline downloads, and
+  crossfade on Android.
 - **Backups on Android:** *Save a backup* uses a browser download, which the Android webview may
   ignore. Restore works.
 

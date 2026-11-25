@@ -14,7 +14,7 @@ use rustypipe::client::{RustyPipe, RustyPipeQuery};
 use rustypipe::model::{
     AlbumItem, AlbumType, ArtistId, ArtistItem, MusicPlaylistItem, Thumbnail, TrackItem, TrackType,
 };
-use rustypipe::param::{Country, Language};
+use rustypipe::param::{Country, Language, StreamFilter};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
@@ -114,6 +114,7 @@ impl Music {
             "/api/playlist" => playlist(&q, need(&params, "id")?).await,
             "/api/artist" => artist(&q, need(&params, "id")?).await,
             "/api/radio" => radio(&q, need(&params, "id")?).await,
+            "/api/stream" => audio_stream(&q, need(&params, "id")?).await,
             "/api/alternate" => alternate(&q, need(&params, "q")?, params.get("exclude").map_or("", String::as_str)).await,
             "/api/moods" => moods(&q).await,
             "/api/mood" => mood(&q, need(&params, "params")?).await,
@@ -528,6 +529,22 @@ async fn radio(q: &RustyPipeQuery, id: &str) -> ApiResult {
     let r = q.music_radio_track(id).await.map_err(upstream)?;
     let items: Vec<Value> = r.items.iter().filter(|t| t.id != id).map(|t| track(t, None, None)).collect();
     Ok(json!({ "items": items }))
+}
+
+/// The top-bitrate audio stream for the native player. The URL expires (`validUntil`, unix
+/// seconds) and the player must send `userAgent` with it, since YouTube checks the client.
+async fn audio_stream(q: &RustyPipeQuery, id: &str) -> ApiResult {
+    let player = q.player(id).await.map_err(upstream)?;
+    let stream = player
+        .select_audio_stream(&StreamFilter::new())
+        .ok_or_else(|| "YouTube didn't offer an audio stream for this song.".to_string())?;
+    Ok(json!({
+        "url": stream.url,
+        "mime": stream.mime,
+        "bitrate": stream.bitrate,
+        "userAgent": q.user_agent(player.client_type).into_owned(),
+        "validUntil": player.valid_until.unix_timestamp(),
+    }))
 }
 
 // Some uploads block embedding; another upload of the same song usually plays.

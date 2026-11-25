@@ -1,6 +1,9 @@
 package app.cadence.player
 
 import android.content.res.Configuration
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.webkit.WebView
@@ -10,12 +13,33 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
+  private var webView: WebView? = null
+
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    // The playback notification needs this on Android 13+.
+    if (Build.VERSION.SDK_INT >= 33 &&
+      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+    ) {
+      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+    }
+  }
+
+  override fun onPause() {
+    super.onPause()
+    // The page decides what plays next when a song ends, so its timers must keep running
+    // while the app is in the background (the foreground service keeps the process alive).
+    webView?.resumeTimers()
+  }
+
+  override fun onStop() {
+    super.onStop()
+    webView?.resumeTimers()
   }
 
   override fun onWebViewCreate(webView: WebView) {
+    this.webView = webView
     // The next song starts when the last one ends, without a tap, so the
     // YouTube player must be allowed to start media on its own.
     webView.settings.mediaPlaybackRequiresUserGesture = false

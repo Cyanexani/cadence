@@ -345,7 +345,149 @@ let lastPositionSave = 0;
 
 const isUsable = (p) => typeof p?.setVolume === "function";
 
+// Android plays the direct audio stream in a native player (ExoPlayer inside a foreground
+// service, see src-tauri/gen/android). It keeps playing with the screen off, shows lock-screen
+// controls, and always takes the highest-bitrate audio YouTube offers. NativePlayer answers the
+// subset of the YouTube iframe player's methods and events that the rest of this file uses.
+const NATIVE_AUDIO = IN_APP && /Android/i.test(navigator.userAgent);
+const YT_STATE = { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 };
+const NATIVE_POLL_MS = 500;
+const STREAM_EXPIRY_MARGIN_S = 60;
+// Same code as an embed-blocked video, so a song that can't be streamed tries another upload.
+const STREAM_UNAVAILABLE = 150;
+
+const nativeCall = (command, args) => window.__TAURI__.core.invoke("native_player", { command, args: args ?? null });
+
+class NativePlayer {
+  constructor(events) {
+    this.events = events;
+    this.generation = 0;
+    this.id = null;
+    this.stream = null;
+    this.retried = false;
+    this.volume = 100;
+    this.silent = false;
+    this.pos = 0;
+    this.dur = 0;
+    this.polledAt = 0;
+    this.playing = false;
+    this.mapped = YT_STATE.UNSTARTED;
+    setInterval(() => this.poll(), NATIVE_POLL_MS);
+    setTimeout(() => events.onReady({ target: this }), 0);
+  }
+
+  emit(data) {
+    if (data === this.mapped) return;
+    this.mapped = data;
+    this.events.onStateChange({ target: this, data });
+  }
+
+  async load(id, start, autoplay) {
+    const generation = ++this.generation;
+    this.id = id;
+    this.pos = start;
+    this.dur = 0;
+    this.retried = false;
+    if (autoplay) this.emit(YT_STATE.BUFFERING);
+    try {
+      this.stream = await api(`/api/stream?id=${enc(id)}`);
+      if (generation !== this.generation) return;
+      await this.send(start, autoplay);
+    } catch {
+      if (generation === this.generation) this.fail();
+    }
+  }
+
+  async send(start, autoplay) {
+    const track = state.queue.find((t) => t.id === this.id) || {};
+    await nativeCall("load", {
+      url: this.stream.url,
+      userAgent: this.stream.userAgent,
+      startSeconds: start,
+      autoplay,
+      title: track.title || "",
+      artist: track.artist || "",
+      art: track.art || null,
+    });
+    this.applyVolume();
+    this.poll();
+  }
+
+  fail() {
+    this.generation += 1;
+    this.events.onError({ target: this, data: STREAM_UNAVAILABLE });
+  }
+
+  async poll() {
+    const generation = this.generation;
+    let s;
+    try { s = await nativeCall("status"); } catch { return; }
+    if (generation !== this.generation || !this.id) return;
+    if (s.command === "next") next();
+    else if (s.command === "previous") prev();
+    if (s.error && s.state !== "ended") {
+      // Stream links expire; ask for a fresh one once before giving up on the song.
+      if (this.retried) return this.fail();
+      this.retried = true;
+      try {
+        this.stream = await api(`/api/stream?id=${enc(this.id)}`);
+        return await this.send(this.pos, true);
+      } catch {
+        return this.fail();
+      }
+    }
+    this.pos = s.position || 0;
+    this.dur = s.duration || this.dur;
+    this.polledAt = performance.now();
+    this.playing = Boolean(s.playing);
+    if (s.state === "ended") this.emit(YT_STATE.ENDED);
+    else if (s.playing) this.emit(YT_STATE.PLAYING);
+    else if (s.state === "buffering" || (s.state === "ready" && s.wantsPlay)) this.emit(YT_STATE.BUFFERING);
+    else if (s.state === "ready") this.emit(YT_STATE.PAUSED);
+  }
+
+  applyVolume() {
+    nativeCall("volume", { volume: this.silent ? 0 : this.volume / 100 }).catch(() => {});
+  }
+
+  loadVideoById({ videoId, startSeconds = 0 }) { return this.load(videoId, startSeconds, true); }
+  cueVideoById({ videoId, startSeconds = 0 }) { return this.load(videoId, startSeconds, false); }
+
+  playVideo() {
+    const expired = this.stream && Date.now() / 1000 > this.stream.validUntil - STREAM_EXPIRY_MARGIN_S;
+    if (expired) return this.load(this.id, this.pos, true);
+    // A finished song has to be rewound before it plays again.
+    if (this.mapped === YT_STATE.ENDED) return this.seekTo(0).then(() => nativeCall("play")).then(() => this.poll()).catch(() => {});
+    return nativeCall("play").then(() => this.poll()).catch(() => {});
+  }
+
+  pauseVideo() { return nativeCall("pause").then(() => this.poll()).catch(() => {}); }
+  stopVideo() { return nativeCall("stop").catch(() => {}); }
+
+  seekTo(seconds) {
+    this.pos = seconds;
+    this.polledAt = performance.now();
+    return nativeCall("seek", { seconds }).then(() => this.poll()).catch(() => {});
+  }
+
+  setVolume(value) { this.volume = value; this.applyVolume(); }
+  mute() { this.silent = true; this.applyVolume(); }
+  unMute() { this.silent = false; this.applyVolume(); }
+
+  getCurrentTime() {
+    return this.playing ? this.pos + (performance.now() - this.polledAt) / 1000 : this.pos;
+  }
+
+  getDuration() { return this.dur; }
+  getPlayerState() { return this.mapped; }
+}
+
 function loadYouTube() {
+  if (NATIVE_AUDIO) {
+    players = [new NativePlayer({ onReady: onPlayerReady, onStateChange: onPlayerState, onError: onPlayerError })];
+    player = players[0];
+    return;
+  }
   window.onYouTubeIframeAPIReady = () => {
     // Two players let one song fade out while the next fades in.
     players = ["yt-a", "yt-b"].map((id) => new YT.Player(id, {
@@ -396,7 +538,7 @@ function duration() {
 
 function onPlayerState(event) {
   if (event.target !== player) return;
-  const S = YT.PlayerState;
+  const S = YT_STATE;
   if (event.data === S.PLAYING) {
     state.playing = true;
     state.skipsInARow = 0;
@@ -562,7 +704,7 @@ function togglePlay() {
   }
   if (!playerReady) return;
   if (fade) endFade();
-  const S = YT.PlayerState;
+  const S = YT_STATE;
   const st = player.getPlayerState();
   if (st === S.PLAYING || st === S.BUFFERING) player.pauseVideo();
   else if (st === S.PAUSED || st === S.CUED || st === S.ENDED) player.playVideo();

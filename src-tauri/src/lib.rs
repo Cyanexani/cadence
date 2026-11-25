@@ -119,6 +119,30 @@ async fn google_sign_out(app: tauri::AppHandle, music: tauri::State<'_, Music>) 
     Ok(())
 }
 
+#[cfg(target_os = "android")]
+struct NativePlayer(tauri::plugin::PluginHandle<tauri::Wry>);
+
+/// The Android audio player (ExoPlayer in a foreground service). `command` is one of the
+/// plugin's commands (load, play, pause, stop, seek, volume, status); other platforms play
+/// through YouTube's embedded player in the page instead.
+#[tauri::command]
+async fn native_player(app: tauri::AppHandle, command: String, args: Option<Value>) -> Result<Value, String> {
+    const COMMANDS: [&str; 7] = ["load", "play", "pause", "stop", "seek", "volume", "status"];
+    if !COMMANDS.contains(&command.as_str()) {
+        return Err("No such player command.".to_string());
+    }
+    #[cfg(target_os = "android")]
+    {
+        let player = app.state::<NativePlayer>();
+        player.0.run_mobile_plugin_async(&command, args.unwrap_or(Value::Null)).await.map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, args);
+        Err("The native player is only on Android.".to_string())
+    }
+}
+
 fn login_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("cadence-login")
         .setup(|app, api| {
@@ -126,6 +150,8 @@ fn login_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             {
                 let handle = api.register_android_plugin("app.cadence.player", "GoogleLoginPlugin")?;
                 app.manage(GoogleLogin(handle));
+                let player = api.register_android_plugin("app.cadence.player", "NativePlayerPlugin")?;
+                app.manage(NativePlayer(player));
             }
             #[cfg(not(target_os = "android"))]
             let _ = (app, api);
@@ -146,7 +172,7 @@ pub fn run() {
             app.manage(Music::new(storage)?);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![api, google_sign_in, google_sign_out])
+        .invoke_handler(tauri::generate_handler![api, google_sign_in, google_sign_out, native_player])
         .run(tauri::generate_context!())
         .expect("error while running Cadence");
 }

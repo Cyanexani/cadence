@@ -518,8 +518,10 @@ function renderSettings() {
   setView(`<h1 class="page-title">Settings</h1>
     <section class="settings glass-inset"><h2>Google account</h2><div id="account-section"></div></section>
     <section class="settings glass-inset"><h2>Playback</h2>
-      ${settingRow("Crossfade", "Fade the next song in while this one fades out. Uses a second YouTube player.",
-        `<input type="range" id="set-crossfade" min="0" max="${CROSSFADE_MAX_SECONDS}" step="1" value="${crossfade}"><output id="set-crossfade-out">${crossfade ? `${crossfade} s` : "Off"}</output>`, "set-crossfade")}
+      ${NATIVE_AUDIO
+        ? `<p class="set-help">Audio quality: Cadence always plays the highest-bitrate audio stream YouTube offers for each song, and keeps playing in the background.</p>`
+        : settingRow("Crossfade", "Fade the next song in while this one fades out. Uses a second YouTube player.",
+          `<input type="range" id="set-crossfade" min="0" max="${CROSSFADE_MAX_SECONDS}" step="1" value="${crossfade}"><output id="set-crossfade-out">${crossfade ? `${crossfade} s` : "Off"}</output>`, "set-crossfade")}
       ${settingRow("Keep playing similar songs", "When the queue runs out, start a radio from the last song.",
         `<input type="checkbox" class="switch" role="switch" id="set-autoplay"${state.autoplay ? " checked" : ""}>`, "set-autoplay")}
       ${settingRow("Skip non-music parts", "Uses SponsorBlock to jump over intros, sponsor reads and talking in music videos.",
@@ -539,9 +541,10 @@ function renderSettings() {
       <div class="hero-actions"><button class="btn" type="button" data-export>Save a backup</button><button class="btn" type="button" data-import>Restore a backup</button><button class="btn" type="button" data-clear-searches>Clear search history</button></div>
     </section>
     <section class="settings glass-inset"><h2>How Cadence plays music</h2>
-      <p class="set-help">Search and browsing come from YouTube Music, and every song plays through YouTube's own embedded player, so nothing is downloaded. Lyrics come from LRCLIB and skip segments from SponsorBlock. Songs whose owners block playback outside YouTube are swapped for another upload or skipped.</p>
+      <p class="set-help">Search and browsing come from YouTube Music, and every song plays through YouTube's own embedded player (in the Android app, as a direct audio stream), so nothing is saved to your device. Lyrics come from LRCLIB and skip segments from SponsorBlock. Songs whose owners block playback outside YouTube are swapped for another upload or skipped.</p>
     </section>`);
-  setFill(document.getElementById("set-crossfade"));
+  const fadeSlider = document.getElementById("set-crossfade");
+  if (fadeSlider) setFill(fadeSlider);
   renderAccountSection();
 }
 
